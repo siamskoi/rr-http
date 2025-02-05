@@ -22,67 +22,47 @@ import (
 )
 
 func TestStaticGzipEnabled(t *testing.T) {
-	cfg := &config.Plugin{
-		Version: "2023.3.5",
-		Path:    "configs/.rr-http-static-gzip.yaml",
-	}
-
-	wg, stopCh := testStaticGzip(t, cfg)
-
-	time.Sleep(time.Second)
-
-	t.Run("ServeEnableGzipOnClient", enableGzipOnClient(21603, "sample-big.txt"))
-	t.Run("ServeDisableGzipOnClient", disableGzipOnClient(21603, "sample-big.txt"))
-
-	stopCh <- struct{}{}
-	wg.Wait()
+	runStaticGzipTest(t, "configs/.rr-http-static-gzip.yaml", true)
 }
 
 func TestStaticGzipDisabled(t *testing.T) {
-	cfg := &config.Plugin{
-		Version: "2023.3.5",
-		Path:    "configs/.rr-http-static.yaml",
+	runStaticGzipTest(t, "configs/.rr-http-static.yaml", false)
+}
+
+func runStaticGzipTest(t *testing.T, configPath string, serverGzipEnabled bool) {
+	cfg := &config.Plugin{Version: "2023.3.5", Path: configPath}
+	wg, stopCh := setupStaticGzipTest(t, cfg)
+
+	time.Sleep(time.Second) // Небольшая задержка
+
+	if serverGzipEnabled {
+		t.Run("ServeEnableGzipOnClient", createClientTest(21603, "sample-big.txt", false, true))
+		t.Run("ServeDisableGzipOnClient", createClientTest(21603, "sample-big.txt", true, false))
+	} else {
+		t.Run("ServeEnableGzipOnClient", createClientTest(21603, "sample-big.txt", false, false))
+		t.Run("ServeDisableGzipOnClient", createClientTest(21603, "sample-big.txt", true, false))
 	}
-
-	wg, stopCh := testStaticGzip(t, cfg)
-
-	time.Sleep(time.Second)
-
-	t.Run("ServeEnableGzipOnClient", enableGzipOnClientAndDisableOnServe(21603, "sample-big.txt"))
-	t.Run("ServeDisableGzipOnClient", disableGzipOnClientAndDisableOnServer(21603, "sample-big.txt"))
 
 	stopCh <- struct{}{}
 	wg.Wait()
 }
 
-func testStaticGzip(t *testing.T, cfg *config.Plugin) (*sync.WaitGroup, chan struct{}) {
+func setupStaticGzipTest(t *testing.T, cfg *config.Plugin) (*sync.WaitGroup, chan struct{}) {
 	cont := endure.New(slog.LevelDebug)
 
-	err := cont.RegisterAll(
-		cfg,
-		&logger.Plugin{},
-		&server.Plugin{},
-		&httpPlugin.Plugin{},
-		&static.Plugin{},
-	)
-	assert.NoError(t, err)
-
-	err = cont.Init()
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, cont.RegisterAll(cfg, &logger.Plugin{}, &server.Plugin{}, &httpPlugin.Plugin{}, &static.Plugin{}))
+	require.NoError(t, cont.Init())
 
 	ch, err := cont.Serve()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
 	wg := &sync.WaitGroup{}
-	wg.Add(1)
-
 	stopCh := make(chan struct{}, 1)
 
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for {
@@ -113,91 +93,29 @@ func testStaticGzip(t *testing.T, cfg *config.Plugin) (*sync.WaitGroup, chan str
 	return wg, stopCh
 }
 
-func enableGzipOnClient(port int, filename string) func(t *testing.T) {
-	return func(t *testing.T) {
-		tr := &http.Transport{
-			MaxIdleConns:       10,
-			IdleConnTimeout:    30 * time.Second,
-			DisableCompression: false,
-		}
-		client := &http.Client{Transport: tr}
-		url := fmt.Sprintf("http://127.0.0.1:%d/%s", port, filename)
-		r, err := client.Get(url)
-		require.NoError(t, err)
-		assert.Equal(t, 200, r.StatusCode)
-		b, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		require.Equal(t, true, r.Uncompressed)
-		require.Contains(t, string(b), "sample")
-		_ = r.Body.Close()
+func getTransport(disableCompression bool) *http.Transport {
+	return &http.Transport{
+		MaxIdleConns:       10,
+		IdleConnTimeout:    30 * time.Second,
+		DisableCompression: disableCompression,
 	}
 }
 
-func disableGzipOnClient(port int, filename string) func(t *testing.T) {
+func createClientTest(port int, filename string, disableCompression, expectUncompressed bool) func(t *testing.T) {
 	return func(t *testing.T) {
-		tr := &http.Transport{
-			MaxIdleConns:       10,
-			IdleConnTimeout:    30 * time.Second,
-			DisableCompression: true,
-		}
-		client := &http.Client{Transport: tr}
+		client := &http.Client{Transport: getTransport(disableCompression)}
+
 		url := fmt.Sprintf("http://127.0.0.1:%d/%s", port, filename)
-		r, err := client.Get(url)
+		resp, err := client.Get(url)
 		require.NoError(t, err)
-		assert.Equal(t, 200, r.StatusCode)
+		defer resp.Body.Close()
 
-		b, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
+		assert.Equal(t, 200, resp.StatusCode)
 
-		require.Equal(t, false, r.Uncompressed)
-
-		require.Contains(t, string(b), "sample")
-		_ = r.Body.Close()
-	}
-}
-
-func disableGzipOnClientAndDisableOnServer(port int, filename string) func(t *testing.T) {
-	return func(t *testing.T) {
-		tr := &http.Transport{
-			MaxIdleConns:       10,
-			IdleConnTimeout:    30 * time.Second,
-			DisableCompression: true,
-		}
-		client := &http.Client{Transport: tr}
-		url := fmt.Sprintf("http://127.0.0.1:%d/%s", port, filename)
-		r, err := client.Get(url)
-		require.NoError(t, err)
-		assert.Equal(t, 200, r.StatusCode)
-
-		b, err := io.ReadAll(r.Body)
+		body, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 
-		require.Equal(t, false, r.Uncompressed)
-
-		require.Contains(t, string(b), "sample")
-		_ = r.Body.Close()
-	}
-}
-
-func enableGzipOnClientAndDisableOnServe(port int, filename string) func(t *testing.T) {
-	return func(t *testing.T) {
-		tr := &http.Transport{
-			MaxIdleConns:       10,
-			IdleConnTimeout:    30 * time.Second,
-			DisableCompression: false,
-		}
-		client := &http.Client{Transport: tr}
-		url := fmt.Sprintf("http://127.0.0.1:%d/%s", port, filename)
-		r, err := client.Get(url)
-		require.NoError(t, err)
-		assert.Equal(t, 200, r.StatusCode)
-
-		b, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-
-		require.Equal(t, false, r.Uncompressed)
-
-		require.Contains(t, string(b), "sample")
-		_ = r.Body.Close()
+		require.Equal(t, expectUncompressed, resp.Uncompressed)
+		require.Contains(t, string(body), "sample")
 	}
 }
