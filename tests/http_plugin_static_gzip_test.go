@@ -33,7 +33,7 @@ func runStaticGzipTest(t *testing.T, configPath string, serverGzipEnabled bool) 
 	cfg := &config.Plugin{Version: "2023.3.5", Path: configPath}
 	wg, stopCh := setupStaticGzipTest(t, cfg)
 
-	time.Sleep(time.Second) // Небольшая задержка
+	time.Sleep(time.Second)
 
 	if serverGzipEnabled {
 		t.Run("ServeEnableGzipOnClient", createClientTest(21603, "sample-big.txt", false, true))
